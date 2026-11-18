@@ -1,0 +1,43 @@
+{
+  "description": "Adds one cross-source conflict: the chat gives a different budget than the RFP. The RFP's several objectives still make the goal ambiguous.",
+  "chat": "I need a plan for Summit Ridge Outdoors for the spring-summer 2027 season, $800,000 total. PDF brief attached. Don't run on Vortex Stream.",
+  "pdf": "Streaming TV Media Plan RFP (Sample).pdf",
+  "advertiser": {
+    "advertiser_id": "adv_summit_ridge",
+    "name": "Summit Ridge Outdoors",
+    "category": "Outdoor retail",
+    "website": "summitridgeoutdoors.example"
+  },
+  "expected": {
+    "draft": true,
+    "advertiser": "Summit Ridge Outdoors",
+    "budget_usd": null,
+    "timeframe": {"start": "2027-03-01", "end": "2027-08-22"},
+    "goal_metric": null,
+    "target_audience": [
+      "Primary: U.S. adults 25-54 who hike, camp or spend regular time outdoors and buy gear and apparel; reached as households on connected TV (about 80% of budget)",
+      "Secondary: adults 55-64, household income $100K+, interested in road trips, birding and fly fishing (about 20% of budget)"
+    ],
+    "restricted_publishers": ["Vortex Stream", "Hollow Peak Media", "Dispatch Now News Network"],
+    "audience_provider_restriction": "Meridian Audience Data only, for third-party audience data",
+    "existing_commitments": [],
+    "buying_preferences": [
+      "Brand-safe, family-appropriate content at or below TV-PG",
+      "Outdoor, travel and lifestyle programming preferred"
+    ],
+    "conflicts": [
+      {
+        "field": "budget_usd",
+        "kind": "conflict",
+        "values": {"chat": 800000, "pdf": 1000000},
+        "expected_handling": "ask_user"
+      },
+      {
+        "field": "goal_metric",
+        "kind": "ambiguous",
+        "note": "RFP lists several objectives. The plan needs one goal metric.",
+        "expected_handling": "ask_user"
+      }
+    ]
+  }
+}
