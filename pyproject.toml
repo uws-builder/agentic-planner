@@ -14,7 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
-ui = ["streamlit>=1.40"]
+ui = ["streamlit>=1.40", "watchdog>=4.0"]  # watchdog lets Streamlit notice changed modules
 
 [tool.setuptools.packages.find]
 where = ["src"]

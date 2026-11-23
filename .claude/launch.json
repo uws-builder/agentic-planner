@@ -6,7 +6,7 @@
       "runtimeExecutable": ".venv/bin/streamlit",
       "runtimeArgs": [
         "run",
-        "src/planner/ui/streamlit_app.py",
+        "app.py",
         "--server.port",
         "8501",
         "--server.headless",

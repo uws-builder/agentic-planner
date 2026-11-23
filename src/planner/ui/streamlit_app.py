@@ -1,6 +1,6 @@
 """Basic demo UI: three sequential screens for building a media plan.
 
-Run:  .venv/bin/streamlit run src/planner/ui/streamlit_app.py
+Run:  .venv/bin/streamlit run app.py   (from the repo root; see app.py for why)
 
   1. Input    your message and RFP/brief, then "Build media plan"
               (the agent visibly thinks, then moves you to screen 2)
