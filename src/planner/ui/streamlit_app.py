@@ -1,10 +1,15 @@
-"""Basic demo UI for Job 1: understand the request, then confirm.
+"""Basic demo UI: a chat-style flow for building a media plan.
 
 Run:  .venv/bin/streamlit run src/planner/ui/streamlit_app.py
 
+Flow: the agent greets you; you add your message and brief and click
+"Build media plan"; the agent thinks; then it shows what it understood, with
+choices where it needs you, and a "Create media plan" button.
+
 A thin layer over the planner package; no logic lives here that isn't in a
 tested module. Demo mode replays a saved extraction (free, repeatable). Real
-mode calls the model with the key from .env.
+mode calls the model with the key from .env. Backend steps are hidden unless
+"Show debug details" is on in the sidebar.
 """
 
 from __future__ import annotations
@@ -35,7 +40,7 @@ from planner.summarize import (
 )
 
 load_env()
-st.set_page_config(page_title="Agentic Media Planner", page_icon="📺", layout="wide")
+st.set_page_config(page_title="Agentic Media Planner", page_icon="📺", layout="centered")
 
 DEMO, REAL = "Demo (canned response)", "Real model"
 BLANK = "(blank: type your own)"
@@ -44,6 +49,9 @@ DEFAULT_ADVERTISER = {
     "name": "Summit Ridge Outdoors",
     "category": "Outdoor retail",
 }
+# Demo mode replays instantly, so pause between "thinking" lines to make it visible.
+# Set PLANNER_DEMO_DELAY=0 to skip (the tests do).
+DEMO_DELAY = float(os.environ.get("PLANNER_DEMO_DELAY", "1.6"))
 
 
 @st.cache_resource
@@ -54,7 +62,14 @@ def load_cases() -> dict[str, Case]:
 CASES = load_cases()
 
 
-# ---- state helpers ---------------------------------------------------------
+# ---- state -----------------------------------------------------------------
+
+
+def reset_run() -> None:
+    for key in ("phase", "submitted", "run", "confirmed", "error"):
+        st.session_state.pop(key, None)
+    for key in [k for k in st.session_state if str(k).startswith("choice_")]:
+        del st.session_state[key]
 
 
 def on_example_change() -> None:
@@ -63,34 +78,27 @@ def on_example_change() -> None:
     reset_run()
 
 
-def reset_run() -> None:
-    for key in ("run", "confirmed"):
-        st.session_state.pop(key, None)
-    for key in [k for k in st.session_state if str(k).startswith("choice_")]:
-        del st.session_state[key]
-
-
-def init_state() -> None:
-    st.session_state.setdefault("mode", DEMO)
-    if "case_name" not in st.session_state:
-        st.session_state["case_name"] = DEMO_CASES[0]
-        st.session_state["chat_text"] = CASES[DEMO_CASES[0]].bundle.chat_text
-
-
-init_state()
+if "case_name" not in st.session_state:
+    st.session_state["case_name"] = DEMO_CASES[0]
+    st.session_state["chat_text"] = CASES[DEMO_CASES[0]].bundle.chat_text
+st.session_state.setdefault("mode", DEMO)
+st.session_state.setdefault("phase", "compose")
 
 
 # ---- pipeline --------------------------------------------------------------
 
 
-def run_pipeline(mode: str, case_name: str, chat_text: str, pdf_path: str | None,
-                 advertiser: dict[str, Any]) -> dict[str, Any]:
+def run_pipeline(sub: dict[str, Any]) -> dict[str, Any]:
     timings: dict[str, float] = {}
     t = time.perf_counter()
-    bundle = build_context(chat_text, pdf_path=pdf_path, advertiser=advertiser)
+    bundle = build_context(sub["chat_text"], pdf_path=sub["pdf_path"], advertiser=sub["advertiser"])
     timings["gather"] = time.perf_counter() - t
 
-    client = ScriptedClient([demo_response(case_name)]) if mode == DEMO else AnthropicClient()
+    client = (
+        ScriptedClient([demo_response(sub["case_name"])])
+        if sub["mode"] == DEMO
+        else AnthropicClient()
+    )
     t = time.perf_counter()
     extraction = extract_intent(bundle, client)
     timings["extract"] = time.perf_counter() - t
@@ -104,16 +112,12 @@ def run_pipeline(mode: str, case_name: str, chat_text: str, pdf_path: str | None
 
     usage = getattr(client, "last_usage", None)
     return {
-        "mode": mode,
         "bundle": bundle,
         "extraction": extraction,
         "problems": problems,
         "reconciled": reconciled,
         "timings": timings,
-        "model": getattr(client, "model", None),
-        "tokens": (
-            f"{usage.input_tokens:,} in / {usage.output_tokens:,} out" if usage else None
-        ),
+        "tokens": f"{usage.input_tokens:,} in / {usage.output_tokens:,} out" if usage else None,
     }
 
 
@@ -136,159 +140,75 @@ with st.sidebar:
             if has_key
             else "⚠️ No `ANTHROPIC_API_KEY` found. Add it to `.env`."
         )
+    st.checkbox("Show debug details", key="debug")
+    st.button("Start over", key="start_over", on_click=reset_run)
     st.divider()
     st.caption(f"Extraction schema v{SCHEMA_VERSION}")
 
 case = CASES.get(st.session_state["case_name"])
 advertiser = case.bundle.advertiser if case else DEFAULT_ADVERTISER
-
-# ---- header ----------------------------------------------------------------
+phase = st.session_state["phase"]
 
 st.title("📺 Agentic Media Planner")
-st.caption("Job 1: understand the request. Plan creation (Job 2) comes next.")
 
-# ---- step 1: intake --------------------------------------------------------
 
-st.subheader("1. Tell me what you need")
-left, right = st.columns([3, 2])
-with left:
-    chat_text = st.text_area(
-        "Your message",
-        key="chat_text",
-        height=110,
-        disabled=(mode == DEMO),
-        placeholder="e.g. I need a plan for Acme for Q1, $500,000 total. Don't run on Example News.",
+# ---- chat pieces -----------------------------------------------------------
+
+
+def user_bubble(sub: dict[str, Any]) -> None:
+    with st.chat_message("user"):
+        st.markdown(sub["chat_text"])
+        if sub["pdf_name"]:
+            st.caption(f"📎 {sub['pdf_name']}")
+
+
+def render_cards(reconciled) -> dict[str, int | None]:
+    """One card per field, needing-input items first. Returns the user's choices."""
+    choices: dict[str, int | None] = {}
+    # sorted() is stable, so the normal field order is kept within each group.
+    for field in sorted(FIELDS, key=lambda f: reconciled[f].status not in NEEDS_INPUT):
+        result = reconciled[field]
+        label = LABELS[field]
+        with st.container(border=True):
+            head, body = st.columns([1, 3])
+            if result.status == "settled":
+                head.markdown(f"✅ **{label}**")
+                value = result.value
+                body.markdown("\n\n".join(value) if isinstance(value, list)
+                              else format_value(field, value))
+                sources = ", ".join(sorted({c.source for c in result.candidates}))
+                body.caption(f"from {sources}")
+            elif result.status == "missing":
+                head.markdown(f"➖ **{label}**")
+                body.markdown("_not stated_")
+            else:
+                head.markdown(f"⚠️ **{label}**")
+                why = ("The sources disagree." if result.status == "conflict"
+                       else "I found several; the plan needs one.")
+                body.markdown(f"**{why}**")
+                options = options_for(result)
+                labels = [o.label for o in options]
+                picked = body.radio("Which should I use?", labels, index=None,
+                                    key=f"choice_{field}", label_visibility="collapsed")
+                choices[field] = labels.index(picked) if picked in labels else None
+            if result.candidates:
+                with body.expander("Evidence"):
+                    for c in result.candidates:
+                        st.markdown(f"**{c.source}**: “{c.quote}”")
+                        if c.note:
+                            st.caption(f"note: {c.note}")
+    return choices
+
+
+def debug_panel(run: dict[str, Any]) -> None:
+    timings = run["timings"]
+    st.caption(
+        "Debug · gather {g:.0f} ms (deterministic) · extract {e:.2f} s (model){t} · "
+        "verify quotes {v:.0f} ms · reconcile {r:.0f} ms".format(
+            g=timings["gather"] * 1000, e=timings["extract"],
+            t=f" · {run['tokens']}" if run["tokens"] else "",
+            v=timings["verify"] * 1000, r=timings["reconcile"] * 1000)
     )
-with right:
-    pdf_path: str | None = None
-    if mode == DEMO:
-        st.markdown("**Brief (PDF)**")
-        st.caption(f"📄 {Path(case.bundle.pdf.source).name}" if case and case.bundle.pdf else "none")
-        pdf_path = case.bundle.pdf.source if case and case.bundle.pdf else None
-    else:
-        upload = st.file_uploader("Brief (PDF), optional", type="pdf", key="pdf_upload")
-        if upload is not None:
-            tmp = Path(tempfile.mkdtemp()) / upload.name
-            tmp.write_bytes(upload.getvalue())
-            pdf_path = str(tmp)
-        elif case and case.bundle.pdf:
-            pdf_path = case.bundle.pdf.source
-            st.caption(f"No upload: using the example brief, 📄 {Path(pdf_path).name}")
-    with st.expander("Advertiser from your session (stub)"):
-        st.json(advertiser)
-
-if st.button("Understand my request", type="primary", key="understand",
-             disabled=not chat_text.strip()):
-    reset_run()
-    try:
-        with st.spinner("Reading your message and brief..."):
-            st.session_state["run"] = run_pipeline(
-                mode, st.session_state["case_name"], chat_text, pdf_path, advertiser
-            )
-    except ModelCallError as err:
-        st.error(f"Could not run the model: {err}")
-    except Exception as err:  # surface anything else plainly in the demo
-        st.error(f"{type(err).__name__}: {err}")
-
-run = st.session_state.get("run")
-if not run:
-    st.stop()
-
-reconciled = run["reconciled"]
-timings = run["timings"]
-
-# ---- pipeline strip --------------------------------------------------------
-
-st.divider()
-n_need = sum(r.status in NEEDS_INPUT for r in reconciled.values())
-n_settled = sum(r.status == "settled" for r in reconciled.values())
-cols = st.columns(4)
-steps = [
-    ("Gather context", "Deterministic", f"{timings['gather']*1000:.0f} ms",
-     "chat + PDF text + advertiser record"),
-    ("Extract", "Model" if run["mode"] == REAL else "Model (canned)",
-     f"{timings['extract']:.1f} s" if run["mode"] == REAL else "replayed",
-     run["tokens"] or "what each source says, with quotes"),
-    ("Verify quotes", "Deterministic", f"{timings['verify']*1000:.0f} ms",
-     "all quotes found in their source" if not run["problems"]
-     else f"{len(run['problems'])} quote problem(s)"),
-    ("Reconcile", "Deterministic", f"{timings['reconcile']*1000:.0f} ms",
-     f"{n_settled} settled, {n_need} need you"),
-]
-for col, (name, kind, took, detail) in zip(cols, steps):
-    with col.container(border=True, height=190):
-        st.markdown(f"**{name}**")
-        st.caption(f"{kind} · {took}")
-        st.caption(detail)
-
-# ---- step 2: what I understood --------------------------------------------
-
-st.subheader("2. Here's what I understood")
-if n_need:
-    st.info(f"{n_need} item(s) need your input before I can plan. Pick an option for each.")
-
-choices: dict[str, int | None] = {}
-# Items that need the user come first (sorted() is stable, so field order is kept otherwise).
-for field in sorted(FIELDS, key=lambda f: reconciled[f].status not in NEEDS_INPUT):
-    result = reconciled[field]
-    label = LABELS[field]
-    with st.container(border=True):
-        head, body = st.columns([1, 4])
-        if result.status == "settled":
-            head.markdown(f"✅ **{label}**")
-            body.markdown(format_value(field, result.value).replace("; ", "\n\n") if
-                          isinstance(result.value, list) else format_value(field, result.value))
-            sources = ", ".join(sorted({c.source for c in result.candidates}))
-            body.caption(f"from {sources}")
-        elif result.status == "missing":
-            head.markdown(f"➖ **{label}**")
-            body.markdown("_not stated_")
-        else:
-            head.markdown(f"⚠️ **{label}**")
-            why = ("The sources disagree." if result.status == "conflict"
-                   else "I found several; the plan needs one.")
-            body.markdown(f"**{why}**")
-            options = options_for(result)
-            labels = [o.label for o in options]
-            picked = body.radio("Which should I use?", labels, index=None,
-                                key=f"choice_{field}", label_visibility="collapsed")
-            choices[field] = labels.index(picked) if picked in labels else None
-        if result.candidates:
-            with body.expander("Evidence"):
-                for c in result.candidates:
-                    st.markdown(f"**{c.source}**: “{c.quote}”")
-                    if c.note:
-                        st.caption(f"note: {c.note}")
-
-resolved = resolve(reconciled, choices)
-
-# ---- step 3: confirm -------------------------------------------------------
-
-st.subheader("3. Confirm")
-if st.button("Confirm and create plan", type="primary", key="confirm",
-             disabled=not resolved.ready):
-    st.session_state["confirmed"] = json.dumps(resolved.to_dict(), sort_keys=True)
-if not resolved.ready:
-    pending = ", ".join(LABELS[f] for f in resolved.pending)
-    st.caption(f"Waiting on: {pending}")
-
-if st.session_state.get("confirmed") == json.dumps(resolved.to_dict(), sort_keys=True):
-    st.success("Confirmed. This is what the plan step receives:")
-    st.json(resolved.to_dict(), expanded=2)
-    with st.container(border=True):
-        st.markdown("**Draft plan: coming next (Job 2)**")
-        st.markdown(
-            "- Map the audience segments to audience IDs in the catalog\n"
-            "- Discover eligible supply, with restricted publishers filtered out\n"
-            "- Formulate and run the optimizer for the chosen goal\n"
-            "- Validate every hard constraint before showing the plan\n"
-            "- Explain the plan and take feedback"
-        )
-
-# ---- under the hood --------------------------------------------------------
-
-st.divider()
-with st.expander("Under the hood"):
     t1, t2, t3 = st.tabs(["What the model saw", "Raw extraction", "Quote check"])
     with t1:
         st.code(run["bundle"].to_prompt_text(), language="markdown")
@@ -301,3 +221,126 @@ with st.expander("Under the hood"):
                 st.warning(f"{p.field} / {p.source}: {p.reason}: “{p.quote[:90]}”")
         else:
             st.success("Every quote was found in the source it cites.")
+
+
+# ---- phase 1: compose ------------------------------------------------------
+
+if phase == "compose":
+    with st.chat_message("assistant"):
+        st.markdown(
+            "Hi! Add your message and your RFP or brief, and I'll read them and "
+            "put together a media plan with you."
+        )
+        if st.session_state.get("error"):
+            st.error(st.session_state["error"])
+
+    with st.container(border=True):
+        chat_text = st.text_area(
+            "Your message",
+            key="chat_text",
+            height=110,
+            disabled=(mode == DEMO),
+            placeholder="e.g. I need a plan for Acme for Q1, $500,000 total. Don't run on Example News.",
+        )
+        pdf_path: str | None = None
+        pdf_name: str | None = None
+        if mode == DEMO:
+            if case and case.bundle.pdf:
+                pdf_path = case.bundle.pdf.source
+                pdf_name = Path(pdf_path).name
+                st.caption(f"📎 {pdf_name}")
+        else:
+            upload = st.file_uploader("RFP or brief (PDF), optional", type="pdf", key="pdf_upload")
+            if upload is not None:
+                tmp = Path(tempfile.mkdtemp()) / upload.name
+                tmp.write_bytes(upload.getvalue())
+                pdf_path, pdf_name = str(tmp), upload.name
+            elif case and case.bundle.pdf:
+                pdf_path = case.bundle.pdf.source
+                pdf_name = Path(pdf_path).name
+                st.caption(f"No upload: using the example brief, 📎 {pdf_name}")
+        if st.button("Build media plan", type="primary", key="build",
+                     disabled=not chat_text.strip()):
+            st.session_state["submitted"] = {
+                "chat_text": chat_text,
+                "pdf_path": pdf_path,
+                "pdf_name": pdf_name,
+                "advertiser": advertiser,
+                "mode": mode,
+                "case_name": st.session_state["case_name"],
+            }
+            st.session_state.pop("error", None)
+            st.session_state["phase"] = "thinking"
+            st.rerun()
+    st.stop()
+
+sub = st.session_state["submitted"]
+user_bubble(sub)
+
+# ---- phase 2: the agent thinks ---------------------------------------------
+
+if phase == "thinking":
+    failure = None
+    with st.chat_message("assistant"):
+        with st.status("Thinking…", expanded=True) as status:
+            try:
+                st.write("Reading your message…")
+                time.sleep(DEMO_DELAY * 0.4 if sub["mode"] == DEMO else 0)
+                st.write("Reading your brief…" if sub["pdf_name"] else "Checking the details…")
+                time.sleep(DEMO_DELAY * 0.35 if sub["mode"] == DEMO else 0)
+                st.write("Checking it all against each other…")
+                run = run_pipeline(sub)
+                time.sleep(DEMO_DELAY * 0.25 if sub["mode"] == DEMO else 0)
+                status.update(label="Done thinking", state="complete", expanded=False)
+            except ModelCallError as err:
+                failure = f"I couldn't run the model: {err}"
+            except Exception as err:  # keep the demo friendly: show the error, let them retry
+                failure = f"Something went wrong ({type(err).__name__}): {err}"
+            if failure:
+                status.update(label="Something went wrong", state="error", expanded=False)
+    if failure:
+        st.session_state["error"] = failure
+        st.session_state["phase"] = "compose"
+    else:
+        st.session_state["run"] = run
+        st.session_state["phase"] = "summary"
+    st.rerun()
+
+# ---- phase 3: summary and choices ------------------------------------------
+
+run = st.session_state["run"]
+reconciled = run["reconciled"]
+n_need = sum(r.status in NEEDS_INPUT for r in reconciled.values())
+
+with st.chat_message("assistant"):
+    if n_need:
+        noun = "item needs" if n_need == 1 else "items need"
+        st.markdown(f"Here's what I understood. **{n_need} {noun} your call** before I build the plan.")
+    else:
+        st.markdown("Here's what I understood. Everything is clear, so I'm ready to build the plan.")
+    choices = render_cards(reconciled)
+    resolved = resolve(reconciled, choices)
+    if st.button("Create media plan", type="primary", key="create_plan",
+                 disabled=not resolved.ready):
+        st.session_state["confirmed"] = json.dumps(resolved.to_dict(), sort_keys=True)
+    if not resolved.ready:
+        st.caption("Waiting on: " + ", ".join(LABELS[f] for f in resolved.pending))
+    if st.session_state.get("debug"):
+        st.divider()
+        debug_panel(run)
+
+# ---- phase 4: plan placeholder ---------------------------------------------
+
+if st.session_state.get("confirmed") == json.dumps(resolved.to_dict(), sort_keys=True):
+    with st.chat_message("assistant"):
+        st.markdown("Great, I have everything I need. Here's what the plan step receives:")
+        st.json(resolved.to_dict(), expanded=2)
+        with st.container(border=True):
+            st.markdown("**Draft plan: coming next (Job 2)**")
+            st.markdown(
+                "- Map the audience segments to audience IDs in the catalog\n"
+                "- Discover eligible supply, with restricted publishers filtered out\n"
+                "- Formulate and run the optimizer for the chosen goal\n"
+                "- Validate every hard constraint before showing the plan\n"
+                "- Explain the plan and take feedback"
+            )
