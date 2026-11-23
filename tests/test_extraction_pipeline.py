@@ -9,6 +9,7 @@ import copy
 import pytest
 
 from planner.cases import Case, discover_case_dirs, load_case
+from planner.demo import PUBLISHERS, demo_response as gold_response
 from planner.evals import expected_needs_input, score
 from planner.model import ScriptedClient
 from planner.schema import Candidate, SchemaError, parse_extraction
@@ -19,77 +20,6 @@ from planner.summarize import (
     reconcile,
     render_summary,
 )
-
-PUBLISHERS = ["Vortex Stream", "Hollow Peak Media", "Dispatch Now News Network"]
-TIMEFRAME = {"start": "2027-03-01", "end": "2027-08-22"}
-
-
-def gold_response(case_name: str) -> dict:
-    """What a perfect model would return for the Summit Ridge cases."""
-    chat_budget = 800000 if "budget_conflict" in case_name else 1000000
-    chat_quote = "$800,000" if chat_budget == 800000 else "$1,000,000"
-    return {
-        "advertiser": [
-            {"source": "chat", "value": "Summit Ridge Outdoors", "quote": "Summit Ridge Outdoors"},
-            {"source": "pdf", "value": "Summit Ridge Outdoors", "quote": "Summit Ridge Outdoors"},
-            {"source": "advertiser_record", "value": "Summit Ridge Outdoors", "quote": "Summit Ridge Outdoors"},
-        ],
-        "budget_usd": [
-            {"source": "chat", "value": chat_budget, "quote": chat_quote},
-            {"source": "pdf", "value": 1000000, "quote": "$1,000,000"},
-        ],
-        "timeframe": [
-            {"source": "pdf", "value": TIMEFRAME, "quote": "March 1 – August 22, 2027"},
-        ],
-        "goal_metric": [
-            {
-                "source": "pdf",
-                "value": "reach and frequency",
-                "quote": "Build reach and frequency against the target audience",
-            },
-            {
-                "source": "pdf",
-                "value": "qualified site traffic and purchases",
-                "quote": "Drive qualified traffic and purchases to summitridgeoutdoors.example during each flight",
-            },
-        ],
-        "target_audience": [
-            {
-                "source": "pdf",
-                "value": ["Primary: U.S. adults 25-54 who hike, camp or spend regular time outdoors"],
-                "quote": "The primary audience is U.S. adults 25–54 who hike, camp or spend regular time outdoors",
-            },
-            {
-                "source": "pdf",
-                "value": ["Secondary: adults 55-64"],
-                "quote": "Adults 55–64",
-            },
-        ],
-        "restricted_publishers": [
-            {"source": "chat", "value": ["Vortex Stream"], "quote": "Don't run on Vortex Stream"},
-            {
-                "source": "pdf",
-                "value": PUBLISHERS,
-                "quote": "No ads on Vortex Stream, Hollow Peak Media or Dispatch Now News Network",
-            },
-        ],
-        "audience_provider_restriction": [
-            {
-                "source": "pdf",
-                "value": "Meridian Audience Data only, for third-party audience data",
-                "quote": "may use only that provider for third-party audience data",
-            }
-        ],
-        "existing_commitments": [],
-        "buying_preferences": [
-            {
-                "source": "pdf",
-                "value": ["Brand-safe, family-appropriate content at or below TV-PG"],
-                "quote": "Brand-safe, family-appropriate content at or below a TV-PG rating",
-            }
-        ],
-    }
-
 
 CASE_DIRS = discover_case_dirs()
 

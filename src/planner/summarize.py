@@ -186,7 +186,7 @@ LABELS = {
 }
 
 
-def _fmt(field: str, value: Any) -> str:
+def format_value(field: str, value: Any) -> str:
     if field == "budget_usd":
         return f"${value:,.0f}"
     if field == "timeframe":
@@ -202,7 +202,7 @@ def render_summary(reconciled: Reconciled) -> str:
         label = LABELS[field]
         if result.status in NEEDS_INPUT:
             options = "; ".join(
-                f"{c.source} says {_fmt(field, c.value)}" for c in result.candidates
+                f"{c.source} says {format_value(field, c.value)}" for c in result.candidates
             )
             lead = "sources disagree" if result.status == "conflict" else "several found, pick one"
             lines.append(f"- {label}: NEEDS YOUR INPUT ({lead}). {options}")
@@ -210,5 +210,5 @@ def render_summary(reconciled: Reconciled) -> str:
             lines.append(f"- {label}: not stated")
         else:
             sources = ", ".join(sorted({c.source for c in result.candidates}))
-            lines.append(f"- {label}: {_fmt(field, result.value)} (from {sources})")
+            lines.append(f"- {label}: {format_value(field, result.value)} (from {sources})")
     return "\n".join(lines)
