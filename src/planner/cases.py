@@ -19,6 +19,7 @@ from typing import Any
 
 from planner.context import ContextBundle, build_context
 from planner.ingest.pdf import PdfTextExtractor
+from planner.services import FakeCommitments, FakeGuidelines
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CASES_DIR = REPO_ROOT / "cases"
@@ -48,6 +49,8 @@ def load_case(case_dir: Path, pdf_extractor: PdfTextExtractor | None = None) -> 
         pdf_path=pdf_path,
         advertiser=raw.get("advertiser"),
         pdf_extractor=pdf_extractor,
+        commitments_service=FakeCommitments(),
+        guideline_store=FakeGuidelines(),
     )
     return Case(
         name=case_dir.name,

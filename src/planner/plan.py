@@ -9,10 +9,11 @@ publishers are filtered out in code, never by a model.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any
 
+from planner.names import norm_name as _norm
+from planner.rules import Constraints
 from planner.summarize import LABELS, format_value
 
 # Overlap between publishers: total unique reach is less than the sum of the lines.
@@ -78,17 +79,23 @@ class Plan:
     excluded: tuple[str, ...]
 
 
-def _norm(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().lower()
-
-
-def build_dummy_plan(values: dict[str, Any], catalog: tuple[CatalogEntry, ...] = CATALOG) -> Plan:
+def build_dummy_plan(
+    values: dict[str, Any],
+    catalog: tuple[CatalogEntry, ...] = CATALOG,
+    constraints: Constraints | None = None,
+) -> Plan:
+    """With `constraints`, exactly the publishers it currently enforces are left out
+    (hard rules, plus soft rules the user hasn't overridden). Without it, only the
+    user's own restricted publishers are."""
     budget = values.get("budget_usd")
     if not isinstance(budget, (int, float)) or isinstance(budget, bool) or budget <= 0:
         raise PlanError("I still need a budget before I can draft a plan.")
     total = int(round(budget))
 
-    restricted = {_norm(p) for p in values.get("restricted_publishers") or []}
+    if constraints is not None:
+        restricted = constraints.enforced_names()
+    else:
+        restricted = {_norm(p) for p in values.get("restricted_publishers") or []}
     eligible = [e for e in catalog if _norm(e.name) not in restricted]
     excluded = tuple(e.name for e in catalog if _norm(e.name) in restricted)
     if not eligible:

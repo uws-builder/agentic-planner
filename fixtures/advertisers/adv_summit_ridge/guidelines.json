@@ -1,0 +1,31 @@
+{
+  "draft": true,
+  "advertiser_id": "adv_summit_ridge",
+  "document": {"name": "Summit Ridge Outdoors Brand Buying Guidelines", "version": "2026.09"},
+  "rules": [
+    {
+      "id": "gr_1",
+      "type": "publisher_exclusion",
+      "strength": "hard",
+      "values": ["Vortex Stream", "Hollow Peak Media", "Dispatch Now News Network"],
+      "quote": "will not run on Vortex Stream, Hollow Peak Media or Dispatch Now News Network",
+      "section": "1.1"
+    },
+    {
+      "id": "gr_2",
+      "type": "publisher_exclusion",
+      "strength": "soft",
+      "values": ["Open Road Channels"],
+      "quote": "avoid Open Road Channels",
+      "section": "1.2"
+    },
+    {
+      "id": "gr_3",
+      "type": "audience_provider_allow",
+      "strength": "hard",
+      "values": ["Meridian Audience Data"],
+      "quote": "must come from Meridian Audience Data only",
+      "section": "2.1"
+    }
+  ]
+}

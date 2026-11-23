@@ -26,13 +26,17 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from planner.cases import Case, discover_case_dirs, load_case
+from planner.commitments import active_in, timeframe_dates
 from planner.config import load_env
 from planner.context import build_context
 from planner.demo import DEMO_CASES, demo_response
 from planner.model import AnthropicClient, ModelCallError, ScriptedClient
+from planner.names import norm_name
 from planner.plan import PlanError, build_dummy_plan, plan_table_markdown, summary_rows
 from planner.resolve import options_for, resolve
+from planner.rules import BLOCKER, INFO, WARNING, Constraints, compose_constraints, validate_plan
 from planner.schema import FIELDS, SCHEMA_VERSION
+from planner.services import FakeCommitments, FakeGuidelines
 from planner.summarize import (
     LABELS,
     NEEDS_INPUT,
@@ -71,8 +75,8 @@ CASES = load_cases()
 
 def reset_all() -> None:
     """Back to a clean screen 1 with nothing remembered."""
-    for key in ("phase", "submitted", "run", "run_sig", "saved_choices", "draft_chat",
-                "pdf_choice", "error"):
+    for key in ("phase", "submitted", "run", "run_sig", "saved_choices", "saved_overrides",
+                "draft_chat", "pdf_choice", "error"):
         st.session_state.pop(key, None)
     for key in [k for k in st.session_state if str(k).startswith("choice_")]:
         del st.session_state[key]
@@ -107,7 +111,13 @@ def signature(sub: dict[str, Any]) -> tuple:
 def run_pipeline(sub: dict[str, Any]) -> dict[str, Any]:
     timings: dict[str, float] = {}
     t = time.perf_counter()
-    bundle = build_context(sub["chat_text"], pdf_path=sub["pdf_path"], advertiser=sub["advertiser"])
+    bundle = build_context(
+        sub["chat_text"],
+        pdf_path=sub["pdf_path"],
+        advertiser=sub["advertiser"],
+        commitments_service=FakeCommitments(),
+        guideline_store=FakeGuidelines(),
+    )
     timings["gather"] = time.perf_counter() - t
 
     client = (
@@ -229,6 +239,17 @@ def debug_panel(run: dict[str, Any]) -> None:
             t=f" · {run['tokens']}" if run["tokens"] else "",
             v=timings["verify"] * 1000, r=timings["reconcile"] * 1000)
     )
+    bundle = run["bundle"]
+    guidelines = bundle.guidelines
+    st.caption(
+        "Looked up by advertiser ID: "
+        + (f"{len(bundle.commitments)} commitment(s)" if bundle.commitments is not None
+           else "commitments unavailable")
+        + "; "
+        + (f"guidelines '{guidelines.document_name}' v{guidelines.version} "
+           f"({len(guidelines.rules)} rules)" if guidelines else "no guidelines")
+        + ". Not yet part of what the model reads."
+    )
     t1, t2, t3 = st.tabs(["What the model saw", "Raw extraction", "Quote check"])
     with t1:
         st.code(run["bundle"].to_prompt_text(), language="markdown")
@@ -347,11 +368,62 @@ def screen_thinking() -> None:
     st.rerun()
 
 
+def constraints_for(run: dict[str, Any], resolved, overrides: set[str]) -> Constraints:
+    """The rules the plan must follow: brand guidelines plus what the user said."""
+    bundle = run["bundle"]
+    start, end = timeframe_dates(resolved.values.get("timeframe"))
+    return compose_constraints(
+        guidelines=bundle.guidelines,
+        user_exclusions=resolved.values.get("restricted_publishers") or [],
+        overrides=overrides,
+        commitments=active_in(bundle.commitments or [], start, end),
+    )
+
+
+def render_notice(notice) -> None:
+    {BLOCKER: st.error, WARNING: st.warning, INFO: st.info}[notice.level](notice.text)
+
+
+def render_rules(run: dict[str, Any], resolved) -> Constraints:
+    """The 'Brand rules' card. Hard rules are locked; soft ones can be included anyway
+    (with a warning). Returns the constraints with the user's overrides applied."""
+    saved: set[str] = set(st.session_state.get("saved_overrides", set()))
+    base = constraints_for(run, resolved, set())
+    if not (base.exclusions or base.allowed_providers):
+        return base
+
+    overrides: set[str] = set()
+    st.markdown("**Brand rules and restrictions**")
+    with st.container(border=True):
+        hard = base.hard_exclusions()
+        if hard:
+            sources = sorted({s for e in hard for s in e.sources})
+            st.markdown("🔒 **Won't run on:** " + ", ".join(e.publisher for e in hard))
+            st.caption("From " + "; ".join(sources) + ". These can't be changed here.")
+        if base.allowed_providers is not None:
+            st.markdown("🔒 **Audience data:** only " + ", ".join(base.allowed_providers))
+        for e in base.soft_exclusions():
+            key = norm_name(e.publisher)
+            if e.overridden:  # a commitment already pulled it in; the notice explains
+                continue
+            st.caption(f"{', '.join(e.sources).capitalize()} say to avoid {e.publisher}.")
+            if st.checkbox(f"Include {e.publisher} anyway", value=key in saved,
+                           key=f"override_{key}"):
+                overrides.add(key)
+        st.session_state["saved_overrides"] = overrides
+        final = constraints_for(run, resolved, overrides)
+        for notice in final.notices:
+            render_notice(notice)
+    return final
+
+
 def screen_verify(run: dict[str, Any]) -> None:
     sub = st.session_state["submitted"]
     reconciled = run["reconciled"]
     step_indicator(2)
     st.subheader("Check what I understood")
+    for warning in run["bundle"].warnings:
+        st.warning(warning)
     n_need = sum(r.status in NEEDS_INPUT for r in reconciled.values())
     if n_need:
         noun = "item needs" if n_need == 1 else "items need"
@@ -366,13 +438,17 @@ def screen_verify(run: dict[str, Any]) -> None:
     choices = render_cards(reconciled, st.session_state["saved_choices"])
     st.session_state["saved_choices"] = choices
     resolved = resolve(reconciled, choices)
+    constraints = render_rules(run, resolved)
 
     back_col, create_col, _ = st.columns([1, 2, 2])
     back_col.button("← Back", key="back_to_input", on_click=go, args=("input",))
     create_col.button("Create media plan", type="primary", key="create_plan",
-                      disabled=not resolved.ready, on_click=go, args=("plan",))
+                      disabled=not resolved.ready or bool(constraints.blockers),
+                      on_click=go, args=("plan",))
     if not resolved.ready:
         st.caption("Waiting on: " + ", ".join(LABELS[f] for f in resolved.pending))
+    if constraints.blockers:
+        st.caption("I can't plan until the problem above is resolved.")
     if st.session_state.get("debug"):
         st.divider()
         debug_panel(run)
@@ -384,13 +460,28 @@ def screen_plan(run: dict[str, Any]) -> None:
         st.session_state["phase"] = "verify"
         st.rerun()
 
+    constraints = constraints_for(run, resolved, set(st.session_state.get("saved_overrides", set())))
+    if constraints.blockers:  # a known hard conflict: never plan against it
+        st.session_state["phase"] = "verify"
+        st.rerun()
+
     step_indicator(3)
     st.subheader("Your draft media plan")
+    plan = None
     try:
-        plan = build_dummy_plan(resolved.values)
+        plan = build_dummy_plan(resolved.values, constraints=constraints)
+        violations = validate_plan(plan, constraints)
     except PlanError as err:
         st.warning(str(err))
     else:
+        if violations:  # the validator is the last line of defense; this should never show
+            st.error("I can't show this plan because it breaks a rule I know about:")
+            for v in violations:
+                st.markdown(f"- {v.reason}")
+            plan = None
+    if plan is not None:
+        for notice in constraints.warnings:
+            st.warning(notice.text)
         st.markdown("**What I'm planning for**")
         with st.container(border=True):
             rows = summary_rows(resolved.values)
@@ -403,7 +494,8 @@ def screen_plan(run: dict[str, Any]) -> None:
         st.markdown("**Draft plan**")
         st.markdown(plan_table_markdown(plan))
         if plan.excluded:
-            st.caption("Left out because of your restrictions: " + ", ".join(plan.excluded) + ".")
+            st.caption("Left out because of your restrictions and brand guidelines: "
+                       + ", ".join(plan.excluded) + ".")
         st.caption(
             "Illustrative draft: every number here is made up. The real plan will come from "
             "your inventory, pricing and an optimizer."

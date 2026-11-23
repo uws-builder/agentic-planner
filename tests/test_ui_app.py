@@ -38,6 +38,7 @@ def build(at: AppTest) -> AppTest:
 def page_text(at: AppTest) -> str:
     parts = [m.value for m in at.markdown] + [c.value for c in at.caption]
     parts += [e.value for e in at.error] + [s.value for s in at.success]
+    parts += [w.value for w in at.warning] + [i.value for i in at.info]
     parts += [s.value for s in at.subheader]
     return "\n".join(parts)
 
@@ -152,6 +153,67 @@ def test_plan_total_follows_the_budget_the_user_picked():
     at.selectbox(key="case_name").select("summit_ridge_budget_conflict").run()
     to_plan(build(at), budget_index=0)  # the chat's $800,000
     assert "**$800,000**" in page_text(at)
+
+
+# ---- brand rules -----------------------------------------------------------
+
+OPEN_ROAD = "override_open road channels"
+
+
+def plan_tables(at: AppTest) -> list[str]:
+    return [m.value for m in at.markdown if "| Publisher |" in m.value]
+
+
+def test_verify_screen_shows_the_brand_rules_with_hard_rules_locked():
+    at = build(fresh())
+    text = page_text(at)
+    assert "Brand rules and restrictions" in text
+    assert "Won't run on:" in text and "Vortex Stream" in text
+    assert "Audience data:** only Meridian Audience Data" in text
+    assert "brand guidelines §1.1" in text
+    # only the soft rule can be toggled; the hard ones are not choices at all
+    assert {c.key for c in at.checkbox if c.key and c.key.startswith("override_")} == {OPEN_ROAD}
+    assert not at.checkbox(key=OPEN_ROAD).value
+
+
+def test_soft_rule_publisher_is_left_out_by_default_and_the_caption_says_so():
+    at = to_plan(build(fresh()))
+    table = plan_tables(at)[0]
+    assert "| Open Road Channels |" not in table
+    assert "Left out because of your restrictions and brand guidelines" in page_text(at)
+    assert "Open Road Channels" in page_text(at)
+
+
+def test_including_a_soft_publisher_anyway_warns_and_puts_it_in_the_plan():
+    at = build(fresh())
+    at.checkbox(key=OPEN_ROAD).check().run()
+    assert not at.exception, at.exception
+    assert "You chose to include Open Road Channels" in page_text(at)
+    to_plan(at)
+    assert "| Open Road Channels |" in plan_tables(at)[0]
+    assert "You chose to include Open Road Channels" in page_text(at)  # the warning follows to screen 3
+    for name in ("Vortex Stream", "Hollow Peak Media", "Dispatch Now News Network"):
+        assert f"| {name} |" not in plan_tables(at)[0]  # hard rules still hold
+
+
+def test_the_override_survives_going_back_and_can_be_undone():
+    at = build(fresh())
+    at.checkbox(key=OPEN_ROAD).check().run()
+    to_plan(at)
+    click(at, "back_to_verify")
+    assert at.checkbox(key=OPEN_ROAD).value  # kept
+    at.checkbox(key=OPEN_ROAD).uncheck().run()
+    click(at, "create_plan")
+    assert "| Open Road Channels |" not in plan_tables(at)[0]
+    assert "You chose to include" not in page_text(at)
+
+
+def test_start_over_forgets_the_override():
+    at = build(fresh())
+    at.checkbox(key=OPEN_ROAD).check().run()
+    click(at, "start_over")
+    build(at)
+    assert not at.checkbox(key=OPEN_ROAD).value
 
 
 # ---- back buttons ----------------------------------------------------------

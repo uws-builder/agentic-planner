@@ -1,0 +1,29 @@
+[
+  {
+    "id": "cm_001",
+    "publisher": "Northlight Streaming",
+    "deal_type": "PG",
+    "remaining_usd": 150000,
+    "start": "2027-03-01",
+    "end": "2027-06-30",
+    "note": "Programmatic Guaranteed, premium SVOD, first-half 2027 commitment. DRAFT fixture."
+  },
+  {
+    "id": "cm_002",
+    "publisher": "TrailCast FAST",
+    "deal_type": "DIO",
+    "remaining_usd": 80000,
+    "start": "2027-05-10",
+    "end": "2027-08-22",
+    "note": "Direct IO, outdoor FAST channels, summer flight. DRAFT fixture."
+  },
+  {
+    "id": "cm_003",
+    "publisher": "Arena Live",
+    "deal_type": "PG",
+    "remaining_usd": 50000,
+    "start": "2026-12-01",
+    "end": "2027-02-15",
+    "note": "Ends before the plan starts, so it should not affect this plan. DRAFT fixture."
+  }
+]
