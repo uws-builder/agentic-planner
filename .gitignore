@@ -3,4 +3,13 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.egg-info/
+
+# Secrets: never commit these. Only the blank template .env.example is tracked.
 .env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+*.pem
+*.key
+id_rsa*
+id_ed25519*

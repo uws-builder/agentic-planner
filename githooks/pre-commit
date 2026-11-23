@@ -1,0 +1,68 @@
+#!/bin/bash
+# Safety net: stops a commit that would expose a secret or a personal email.
+#
+# Turn it on once per clone (git does not do this automatically):
+#     git config core.hooksPath githooks
+#
+# It checks three things, and prints WHAT is wrong but never the secret itself:
+#   1. staged files that must never be committed (.env, key files, Streamlit secrets)
+#   2. added lines that look like an API key, token, private key, or a personal email
+#   3. that the commit's author and committer email is a GitHub private (noreply) address
+#
+# A deliberate bypass exists (git commit --no-verify). Use it only if you are sure.
+# The personal-email check is a pattern, not your address, so this file can be committed safely.
+
+fail=0
+problem() { echo "pre-commit: BLOCKED - $1" >&2; fail=1; }
+
+# 1. Files that should never be committed.
+while IFS= read -r f; do
+  case "$f" in
+    .env.example|*/.env.example) ;;
+    .env|*/.env|.env.*|*/.env.*|*.pem|*.key|id_rsa*|*/id_rsa*|id_ed25519*|*/id_ed25519*|.streamlit/secrets.toml|*/.streamlit/secrets.toml)
+      problem "'$f' is a secrets file and must stay out of git" ;;
+  esac
+done < <(git diff --cached --name-only --diff-filter=ACMR)
+
+# 2. Secret-like text, or a personal email, in the lines being added.
+names=(
+  "an Anthropic API key"
+  "an OpenAI-style API key"
+  "a GitHub token"
+  "an AWS access key"
+  "a private key block"
+  "an API key assigned to a variable"
+  "an email address at a personal mail provider"
+)
+patterns=(
+  'sk-ant-[A-Za-z0-9_-]{8,}'
+  'sk-[A-Za-z0-9]{20,}'
+  'ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9]{20,}'
+  'AKIA[0-9A-Z]{16}'
+  'BEGIN [A-Z ]*PRIVATE KEY'
+  'API_KEY[[:space:]]*[:=][[:space:]]*["'"'"']?[A-Za-z0-9_-]{20,}'
+  '[A-Za-z0-9._%+-]+@(gmail|googlemail|yahoo|outlook|hotmail|icloud|proton|protonmail)\.(com|me)'
+)
+added=$(git diff --cached -U0 --no-color --diff-filter=ACMR | grep -E '^\+' | grep -v -E '^\+\+\+ ')
+for i in "${!patterns[@]}"; do
+  if printf '%s\n' "$added" | grep -q -i -E "${patterns[$i]}"; then
+    problem "the staged changes contain ${names[$i]} (run 'git diff --cached' to find it)"
+  fi
+done
+
+# 3. The identity this commit will carry.
+for kind in AUTHOR COMMITTER; do
+  ident=$(git var "GIT_${kind}_IDENT" 2>/dev/null) || continue
+  email=${ident#*<}
+  email=${email%%>*}
+  case "$email" in
+    *@users.noreply.github.com) ;;
+    *) problem "the ${kind} email is not a GitHub private (noreply) address. Set it with: git config user.email '<id>+<username>@users.noreply.github.com'" ;;
+  esac
+done
+
+if [ "$fail" -ne 0 ]; then
+  echo "pre-commit: nothing was committed. Fix the above and try again." >&2
+  exit 1
+fi
+exit 0

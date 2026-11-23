@@ -1,0 +1,39 @@
+#!/bin/bash
+# Safety net: stops a push that would send commits with a non-private author email.
+#
+# pre-commit covers commits made here; this covers commits that arrive another way
+# (made with a different tool or config, amended, or cherry-picked).
+# Turn it on once per clone:  git config core.hooksPath githooks
+# Deliberate bypass: git push --no-verify
+#
+# It prints the short hash of each bad commit, never the email address.
+
+zero=0000000000000000000000000000000000000000
+bad=0
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue   # deleting a remote branch: nothing to check
+  if [ "$remote_sha" = "$zero" ]; then
+    commits=$(git rev-list "$local_sha" --not --remotes)
+  else
+    commits=$(git rev-list "$remote_sha..$local_sha" 2>/dev/null || git rev-list "$local_sha")
+  fi
+  for c in $commits; do
+    for pair in "ae:author" "ce:committer"; do
+      field=${pair%%:*}
+      label=${pair##*:}
+      email=$(git log -1 --format="%$field" "$c")
+      case "$email" in
+        *@users.noreply.github.com) ;;
+        *) echo "pre-push: BLOCKED - commit $(git rev-parse --short "$c") has a non-private $label email" >&2
+           bad=1 ;;
+      esac
+    done
+  done
+done
+
+if [ "$bad" -ne 0 ]; then
+  echo "pre-push: nothing was pushed. Rewrite those commits with a noreply email first." >&2
+  exit 1
+fi
+exit 0
