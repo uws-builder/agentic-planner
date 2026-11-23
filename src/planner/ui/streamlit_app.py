@@ -1,20 +1,21 @@
-"""Basic demo UI: a chat-style flow for building a media plan.
+"""Basic demo UI: three sequential screens for building a media plan.
 
 Run:  .venv/bin/streamlit run src/planner/ui/streamlit_app.py
 
-Flow: the agent greets you; you add your message and brief and click
-"Build media plan"; the agent thinks; then it shows what it understood, with
-choices where it needs you, and a "Create media plan" button.
+  1. Input    your message and RFP/brief, then "Build media plan"
+              (the agent visibly thinks, then moves you to screen 2)
+  2. Verify   what the agent understood, with choices where it needs you,
+              then "Create media plan"
+  3. Plan     the summary of what we planned for, and the draft plan
 
-A thin layer over the planner package; no logic lives here that isn't in a
-tested module. Demo mode replays a saved extraction (free, repeatable). Real
-mode calls the model with the key from .env. Backend steps are hidden unless
-"Show debug details" is on in the sidebar.
+Back buttons keep what you entered and chose. A thin layer over the planner
+package; no logic lives here that isn't in a tested module. Demo mode replays
+a saved extraction (free, repeatable). Real mode calls the model with the key
+from .env. Backend details are hidden unless "Show debug details" is on.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 import time
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from planner.cases import Case, discover_case_dirs, load_case
 from planner.config import load_env
@@ -53,6 +55,7 @@ DEFAULT_ADVERTISER = {
 # Demo mode replays instantly, so pause between "thinking" lines to make it visible.
 # Set PLANNER_DEMO_DELAY=0 to skip (the tests do).
 DEMO_DELAY = float(os.environ.get("PLANNER_DEMO_DELAY", "1.6"))
+STEPS = ("Input", "Verify", "Plan")
 
 
 @st.cache_resource
@@ -66,24 +69,36 @@ CASES = load_cases()
 # ---- state -----------------------------------------------------------------
 
 
-def reset_run() -> None:
-    for key in ("phase", "submitted", "run", "confirmed", "error"):
+def reset_all() -> None:
+    """Back to a clean screen 1 with nothing remembered."""
+    for key in ("phase", "submitted", "run", "run_sig", "saved_choices", "draft_chat",
+                "pdf_choice", "error"):
         st.session_state.pop(key, None)
     for key in [k for k in st.session_state if str(k).startswith("choice_")]:
         del st.session_state[key]
+    st.session_state.pop("chat_text", None)
 
 
 def on_example_change() -> None:
     name = st.session_state["case_name"]
+    reset_all()
     st.session_state["chat_text"] = CASES[name].bundle.chat_text if name in CASES else ""
-    reset_run()
+    st.session_state["draft_chat"] = st.session_state["chat_text"]
+
+
+def go(phase: str) -> None:
+    st.session_state["phase"] = phase
 
 
 if "case_name" not in st.session_state:
     st.session_state["case_name"] = DEMO_CASES[0]
-    st.session_state["chat_text"] = CASES[DEMO_CASES[0]].bundle.chat_text
 st.session_state.setdefault("mode", DEMO)
-st.session_state.setdefault("phase", "compose")
+st.session_state.setdefault("phase", "input")
+st.session_state.setdefault("saved_choices", {})
+
+
+def signature(sub: dict[str, Any]) -> tuple:
+    return (sub["mode"], sub["case_name"], sub["chat_text"], sub["pdf_path"])
 
 
 # ---- pipeline --------------------------------------------------------------
@@ -126,11 +141,10 @@ def run_pipeline(sub: dict[str, Any]) -> dict[str, Any]:
 
 with st.sidebar:
     st.header("Setup")
-    mode = st.radio("Model", [DEMO, REAL], key="mode", on_change=reset_run)
+    mode = st.radio("Model", [DEMO, REAL], key="mode", on_change=reset_all)
     names = list(DEMO_CASES) if mode == DEMO else list(CASES) + [BLANK]
     if st.session_state["case_name"] not in names:
         st.session_state["case_name"] = names[0]
-        st.session_state["chat_text"] = CASES[names[0]].bundle.chat_text
     st.selectbox("Example case", names, key="case_name", on_change=on_example_change)
     if mode == DEMO:
         st.caption("Replays a saved extraction. Free and repeatable; inputs are locked.")
@@ -142,7 +156,7 @@ with st.sidebar:
             else "⚠️ No `ANTHROPIC_API_KEY` found. Add it to `.env`."
         )
     st.checkbox("Show debug details", key="debug")
-    st.button("Start over", key="start_over", on_click=reset_run)
+    st.button("Start over", key="start_over", on_click=reset_all)
     st.divider()
     st.caption(f"Extraction schema v{SCHEMA_VERSION}")
 
@@ -153,17 +167,22 @@ phase = st.session_state["phase"]
 st.title("📺 Agentic Media Planner")
 
 
-# ---- chat pieces -----------------------------------------------------------
+def step_indicator(current: int) -> None:
+    parts = []
+    for i, name in enumerate(STEPS, start=1):
+        if i < current:
+            parts.append(f"✓ {name}")
+        elif i == current:
+            parts.append(f"**● {i}. {name}**")
+        else:
+            parts.append(f"○ {i}. {name}")
+    st.caption("  ›  ".join(parts))
 
 
-def user_bubble(sub: dict[str, Any]) -> None:
-    with st.chat_message("user"):
-        st.markdown(sub["chat_text"])
-        if sub["pdf_name"]:
-            st.caption(f"📎 {sub['pdf_name']}")
+# ---- shared pieces ---------------------------------------------------------
 
 
-def render_cards(reconciled) -> dict[str, int | None]:
+def render_cards(reconciled, saved: dict[str, int | None]) -> dict[str, int | None]:
     """One card per field, needing-input items first. Returns the user's choices."""
     choices: dict[str, int | None] = {}
     # sorted() is stable, so the normal field order is kept within each group.
@@ -189,7 +208,7 @@ def render_cards(reconciled) -> dict[str, int | None]:
                 body.markdown(f"**{why}**")
                 options = options_for(result)
                 labels = [o.label for o in options]
-                picked = body.radio("Which should I use?", labels, index=None,
+                picked = body.radio("Which should I use?", labels, index=saved.get(field),
                                     key=f"choice_{field}", label_visibility="collapsed")
                 choices[field] = labels.index(picked) if picked in labels else None
             if result.candidates:
@@ -224,22 +243,30 @@ def debug_panel(run: dict[str, Any]) -> None:
             st.success("Every quote was found in the source it cites.")
 
 
-# ---- phase 1: compose ------------------------------------------------------
+# ---- screens ---------------------------------------------------------------
+# Each screen is rendered inside one placeholder (root), so a new screen replaces the
+# old one immediately instead of leaving it faded underneath while the script runs.
 
-if phase == "compose":
-    with st.chat_message("assistant"):
-        st.markdown(
-            "Hi! Add your message and your RFP or brief, and I'll read them and "
-            "put together a media plan with you."
+root = st.empty()
+
+
+def screen_input() -> None:
+    step_indicator(1)
+    st.subheader("Tell me what you need")
+    st.markdown("Add your message and your RFP or brief, and I'll read them and put "
+                "together a media plan with you.")
+    if st.session_state.get("error"):
+        st.error(st.session_state["error"])
+
+    if "chat_text" not in st.session_state:  # widget state is dropped when you leave the screen
+        st.session_state["chat_text"] = st.session_state.get(
+            "draft_chat", case.bundle.chat_text if case else ""
         )
-        if st.session_state.get("error"):
-            st.error(st.session_state["error"])
-
     with st.container(border=True):
         chat_text = st.text_area(
             "Your message",
             key="chat_text",
-            height=110,
+            height=120,
             disabled=(mode == DEMO),
             placeholder="e.g. I need a plan for Acme for Q1, $500,000 total. Don't run on Example News.",
         )
@@ -256,107 +283,165 @@ if phase == "compose":
                 tmp = Path(tempfile.mkdtemp()) / upload.name
                 tmp.write_bytes(upload.getvalue())
                 pdf_path, pdf_name = str(tmp), upload.name
+                st.session_state["pdf_choice"] = (pdf_path, pdf_name)
+            elif "pdf_choice" in st.session_state:
+                pdf_path, pdf_name = st.session_state["pdf_choice"]
+                st.caption(f"📎 Using {pdf_name} (uploaded earlier)")
             elif case and case.bundle.pdf:
                 pdf_path = case.bundle.pdf.source
                 pdf_name = Path(pdf_path).name
                 st.caption(f"No upload: using the example brief, 📎 {pdf_name}")
-        if st.button("Build media plan", type="primary", key="build",
-                     disabled=not chat_text.strip()):
-            st.session_state["submitted"] = {
-                "chat_text": chat_text,
-                "pdf_path": pdf_path,
-                "pdf_name": pdf_name,
-                "advertiser": advertiser,
-                "mode": mode,
-                "case_name": st.session_state["case_name"],
-            }
-            st.session_state.pop("error", None)
+        with st.expander("Advertiser from your session (stub)"):
+            st.json(advertiser)
+
+    if st.button("Build media plan", type="primary", key="build", disabled=not chat_text.strip()):
+        sub = {
+            "chat_text": chat_text,
+            "pdf_path": pdf_path,
+            "pdf_name": pdf_name,
+            "advertiser": advertiser,
+            "mode": mode,
+            "case_name": st.session_state["case_name"],
+        }
+        st.session_state["draft_chat"] = chat_text
+        st.session_state["submitted"] = sub
+        st.session_state.pop("error", None)
+        if "run" in st.session_state and st.session_state.get("run_sig") == signature(sub):
+            st.session_state["phase"] = "verify"  # nothing changed: reuse, no second model call
+        else:
+            st.session_state.pop("run", None)
+            st.session_state["saved_choices"] = {}
             st.session_state["phase"] = "thinking"
-            st.rerun()
-    st.stop()
+        st.rerun()
 
-sub = st.session_state["submitted"]
-user_bubble(sub)
 
-# ---- phase 2: the agent thinks ---------------------------------------------
-
-if phase == "thinking":
+def screen_thinking() -> None:
+    """The agent thinks: the transition from screen 1 to screen 2."""
+    sub = st.session_state["submitted"]
+    step_indicator(1)
+    st.subheader("Reading your request")
     failure = None
-    with st.chat_message("assistant"):
-        with st.status("Thinking…", expanded=True) as status:
-            try:
-                st.write("Reading your message…")
-                time.sleep(DEMO_DELAY * 0.4 if sub["mode"] == DEMO else 0)
-                st.write("Reading your brief…" if sub["pdf_name"] else "Checking the details…")
-                time.sleep(DEMO_DELAY * 0.35 if sub["mode"] == DEMO else 0)
-                st.write("Checking it all against each other…")
-                run = run_pipeline(sub)
-                time.sleep(DEMO_DELAY * 0.25 if sub["mode"] == DEMO else 0)
-                status.update(label="Done thinking", state="complete", expanded=False)
-            except ModelCallError as err:
-                failure = f"I couldn't run the model: {err}"
-            except Exception as err:  # keep the demo friendly: show the error, let them retry
-                failure = f"Something went wrong ({type(err).__name__}): {err}"
-            if failure:
-                status.update(label="Something went wrong", state="error", expanded=False)
+    with st.status("Thinking…", expanded=True) as status:
+        try:
+            st.write("Reading your message…")
+            time.sleep(DEMO_DELAY * 0.4 if sub["mode"] == DEMO else 0)
+            st.write("Reading your brief…" if sub["pdf_name"] else "Checking the details…")
+            time.sleep(DEMO_DELAY * 0.35 if sub["mode"] == DEMO else 0)
+            st.write("Checking it all against each other…")
+            run = run_pipeline(sub)
+            time.sleep(DEMO_DELAY * 0.25 if sub["mode"] == DEMO else 0)
+            status.update(label="Done thinking", state="complete", expanded=False)
+        except ModelCallError as err:
+            failure = f"I couldn't run the model: {err}"
+        except Exception as err:  # keep the demo friendly: show the error, let them retry
+            failure = f"Something went wrong ({type(err).__name__}): {err}"
+        if failure:
+            status.update(label="Something went wrong", state="error", expanded=False)
     if failure:
         st.session_state["error"] = failure
-        st.session_state["phase"] = "compose"
+        st.session_state["phase"] = "input"
     else:
         st.session_state["run"] = run
-        st.session_state["phase"] = "summary"
+        st.session_state["run_sig"] = signature(sub)
+        st.session_state["phase"] = "verify"
     st.rerun()
 
-# ---- phase 3: summary and choices ------------------------------------------
 
-run = st.session_state["run"]
-reconciled = run["reconciled"]
-n_need = sum(r.status in NEEDS_INPUT for r in reconciled.values())
-
-with st.chat_message("assistant"):
+def screen_verify(run: dict[str, Any]) -> None:
+    sub = st.session_state["submitted"]
+    reconciled = run["reconciled"]
+    step_indicator(2)
+    st.subheader("Check what I understood")
+    n_need = sum(r.status in NEEDS_INPUT for r in reconciled.values())
     if n_need:
         noun = "item needs" if n_need == 1 else "items need"
-        st.markdown(f"Here's what I understood. **{n_need} {noun} your call** before I build the plan.")
+        st.markdown(f"**{n_need} {noun} your call** before I can build the plan.")
     else:
-        st.markdown("Here's what I understood. Everything is clear, so I'm ready to build the plan.")
-    choices = render_cards(reconciled)
+        st.markdown("Everything is clear. Check it over, then create the plan.")
+    with st.expander("Your request"):
+        st.markdown(sub["chat_text"])
+        if sub["pdf_name"]:
+            st.caption(f"📎 {sub['pdf_name']}")
+
+    choices = render_cards(reconciled, st.session_state["saved_choices"])
+    st.session_state["saved_choices"] = choices
     resolved = resolve(reconciled, choices)
-    if st.button("Create media plan", type="primary", key="create_plan",
-                 disabled=not resolved.ready):
-        st.session_state["confirmed"] = json.dumps(resolved.to_dict(), sort_keys=True)
+
+    back_col, create_col, _ = st.columns([1, 2, 2])
+    back_col.button("← Back", key="back_to_input", on_click=go, args=("input",))
+    create_col.button("Create media plan", type="primary", key="create_plan",
+                      disabled=not resolved.ready, on_click=go, args=("plan",))
     if not resolved.ready:
         st.caption("Waiting on: " + ", ".join(LABELS[f] for f in resolved.pending))
     if st.session_state.get("debug"):
         st.divider()
         debug_panel(run)
 
-# ---- phase 4: plan placeholder ---------------------------------------------
 
-if st.session_state.get("confirmed") == json.dumps(resolved.to_dict(), sort_keys=True):
-    with st.chat_message("assistant"):
-        try:
-            plan = build_dummy_plan(resolved.values)
-        except PlanError as err:
-            st.warning(str(err))
+def screen_plan(run: dict[str, Any]) -> None:
+    resolved = resolve(run["reconciled"], st.session_state["saved_choices"])
+    if not resolved.ready:  # choices were lost; send the user back to answer them
+        st.session_state["phase"] = "verify"
+        st.rerun()
+
+    step_indicator(3)
+    st.subheader("Your draft media plan")
+    try:
+        plan = build_dummy_plan(resolved.values)
+    except PlanError as err:
+        st.warning(str(err))
+    else:
+        st.markdown("**What I'm planning for**")
+        with st.container(border=True):
+            rows = summary_rows(resolved.values)
+            left_col, right_col = st.columns(2)
+            for i, (label, text) in enumerate(rows):
+                (left_col if i < (len(rows) + 1) // 2 else right_col).markdown(
+                    f"**{label}**  \n{text.replace('; ', ', ')}"
+                )
+
+        st.markdown("**Draft plan**")
+        st.markdown(plan_table_markdown(plan))
+        if plan.excluded:
+            st.caption("Left out because of your restrictions: " + ", ".join(plan.excluded) + ".")
+        st.caption(
+            "Illustrative draft: every number here is made up. The real plan will come from "
+            "your inventory, pricing and an optimizer."
+        )
+        with st.expander("What the plan step received"):
+            st.json(resolved.to_dict(), expanded=2)
+
+    back_col, restart_col, _ = st.columns([1, 1, 2])
+    back_col.button("← Back", key="back_to_verify", on_click=go, args=("verify",))
+    restart_col.button("Start over", key="plan_start_over", on_click=reset_all)
+
+
+def scroll_to_top_on_screen_change() -> None:
+    """Streamlit keeps the scroll position across reruns; a new screen should start at the top."""
+    if st.session_state.get("_shown_phase") != phase:
+        st.session_state["_shown_phase"] = phase
+        components.html(
+            f"""<script>/* {time.time()} */
+            const doc = window.parent.document;
+            const main = doc.querySelector('[data-testid="stMain"]') || doc.querySelector('section.main');
+            if (main) main.scrollTo({{top: 0, behavior: 'instant'}});
+            </script>""",
+            height=0,
+        )
+
+
+with root.container():
+    scroll_to_top_on_screen_change()
+    if phase == "input":
+        screen_input()
+    elif phase == "thinking":
+        screen_thinking()
+    else:
+        current_run = st.session_state.get("run")
+        if current_run is None:  # e.g. the page was reloaded mid-flow
+            st.session_state["phase"] = "input"
+            st.rerun()
+        elif phase == "verify":
+            screen_verify(current_run)
         else:
-            st.markdown("Great, I have everything I need. Here's a draft media plan.")
-
-            st.markdown("**What I'm planning for**")
-            with st.container(border=True):
-                rows = summary_rows(resolved.values)
-                left_col, right_col = st.columns(2)
-                for i, (label, text) in enumerate(rows):
-                    (left_col if i < (len(rows) + 1) // 2 else right_col).markdown(
-                        f"**{label}**  \n{text.replace('; ', ', ')}"
-                    )
-
-            st.markdown("**Draft plan**")
-            st.markdown(plan_table_markdown(plan))
-            if plan.excluded:
-                st.caption("Left out because of your restrictions: " + ", ".join(plan.excluded) + ".")
-            st.caption(
-                "Illustrative draft: every number here is made up. The real plan will come from "
-                "your inventory, pricing and an optimizer."
-            )
-            with st.expander("What the plan step received"):
-                st.json(resolved.to_dict(), expanded=2)
+            screen_plan(current_run)
