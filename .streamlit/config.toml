@@ -1,0 +1,5 @@
+# Only this machine can open the app. Without this, Streamlit listens on every network
+# interface, so anyone on the same network could open it, switch to "Real model", and
+# spend the API key loaded from .env. Keep this unless the app gets real authentication.
+[server]
+address = "localhost"

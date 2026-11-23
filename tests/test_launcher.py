@@ -45,6 +45,24 @@ def test_the_launcher_runs_the_app(monkeypatch):
     assert {"back_to_input", "create_plan"} <= {b.key for b in at.button if b.key}
 
 
+def test_the_app_only_listens_on_localhost():
+    """Real-model mode spends the API key from .env. If Streamlit listened on every
+    interface, anyone on the same network could open the app and use that key."""
+    import tomllib
+
+    config = tomllib.loads((ROOT / ".streamlit" / "config.toml").read_text())
+    assert config["server"]["address"] in ("localhost", "127.0.0.1")
+
+
+def test_no_launch_option_widens_the_binding():
+    import json
+
+    config = json.loads((ROOT / ".claude" / "launch.json").read_text())
+    for entry in config["configurations"]:
+        args = " ".join(entry["runtimeArgs"])
+        assert "0.0.0.0" not in args and "--server.address" not in args
+
+
 def test_launch_config_points_at_the_launcher():
     import json
 
