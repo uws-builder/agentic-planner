@@ -28,6 +28,7 @@ from planner.config import load_env
 from planner.context import build_context
 from planner.demo import DEMO_CASES, demo_response
 from planner.model import AnthropicClient, ModelCallError, ScriptedClient
+from planner.plan import PlanError, build_dummy_plan, plan_table_markdown, summary_rows
 from planner.resolve import options_for, resolve
 from planner.schema import FIELDS, SCHEMA_VERSION
 from planner.summarize import (
@@ -333,14 +334,29 @@ with st.chat_message("assistant"):
 
 if st.session_state.get("confirmed") == json.dumps(resolved.to_dict(), sort_keys=True):
     with st.chat_message("assistant"):
-        st.markdown("Great, I have everything I need. Here's what the plan step receives:")
-        st.json(resolved.to_dict(), expanded=2)
-        with st.container(border=True):
-            st.markdown("**Draft plan: coming next (Job 2)**")
-            st.markdown(
-                "- Map the audience segments to audience IDs in the catalog\n"
-                "- Discover eligible supply, with restricted publishers filtered out\n"
-                "- Formulate and run the optimizer for the chosen goal\n"
-                "- Validate every hard constraint before showing the plan\n"
-                "- Explain the plan and take feedback"
+        try:
+            plan = build_dummy_plan(resolved.values)
+        except PlanError as err:
+            st.warning(str(err))
+        else:
+            st.markdown("Great, I have everything I need. Here's a draft media plan.")
+
+            st.markdown("**What I'm planning for**")
+            with st.container(border=True):
+                rows = summary_rows(resolved.values)
+                left_col, right_col = st.columns(2)
+                for i, (label, text) in enumerate(rows):
+                    (left_col if i < (len(rows) + 1) // 2 else right_col).markdown(
+                        f"**{label}**  \n{text.replace('; ', ', ')}"
+                    )
+
+            st.markdown("**Draft plan**")
+            st.markdown(plan_table_markdown(plan))
+            if plan.excluded:
+                st.caption("Left out because of your restrictions: " + ", ".join(plan.excluded) + ".")
+            st.caption(
+                "Illustrative draft: every number here is made up. The real plan will come from "
+                "your inventory, pricing and an optimizer."
             )
+            with st.expander("What the plan step received"):
+                st.json(resolved.to_dict(), expanded=2)

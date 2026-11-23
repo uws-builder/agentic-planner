@@ -61,7 +61,7 @@ def test_clean_case_needs_only_the_goal_then_creates_the_plan():
     at = build(fresh())
     assert choice_keys(at) == {"choice_goal_metric"}
     assert at.button(key="create_plan").disabled
-    assert "Draft plan" not in page_text(at)
+    assert "draft media plan" not in page_text(at)
 
     goal = at.radio(key="choice_goal_metric")
     goal.set_value(goal.options[0]).run()
@@ -69,7 +69,37 @@ def test_clean_case_needs_only_the_goal_then_creates_the_plan():
 
     at.button(key="create_plan").click().run()
     assert not at.exception
-    assert "Draft plan: coming next" in page_text(at)
+    text = page_text(at)
+    assert "Here's a draft media plan" in text
+    assert "What I'm planning for" in text
+    assert "| **Total** |" in text and "**$1,000,000**" in text
+    assert "Left out because of your restrictions" in text
+    assert "every number here is made up" in text
+
+
+def test_restricted_publishers_never_appear_as_plan_lines():
+    at = build(fresh())
+    goal = at.radio(key="choice_goal_metric")
+    goal.set_value(goal.options[0]).run()
+    at.button(key="create_plan").click().run()
+    table_rows = [m.value for m in at.markdown if "| Publisher |" in m.value]
+    assert len(table_rows) == 1
+    for name in ("Vortex Stream", "Hollow Peak Media", "Dispatch Now News Network"):
+        assert f"| {name} |" not in table_rows[0]
+    assert "| Northlight Streaming |" in table_rows[0]
+
+
+def test_plan_total_follows_the_budget_the_user_picked():
+    at = fresh()
+    at.selectbox(key="case_name").select("summit_ridge_budget_conflict").run()
+    build(at)
+    budget = at.radio(key="choice_budget_usd")
+    budget.set_value(budget.options[0]).run()  # the chat's $800,000
+    goal = at.radio(key="choice_goal_metric")
+    goal.set_value(goal.options[0]).run()
+    at.button(key="create_plan").click().run()
+    assert not at.exception
+    assert "**$800,000**" in page_text(at)
 
 
 def test_conflict_case_needs_budget_and_goal():
@@ -92,10 +122,10 @@ def test_changing_a_choice_after_creating_hides_the_plan_step():
     goal = at.radio(key="choice_goal_metric")
     goal.set_value(goal.options[0]).run()
     at.button(key="create_plan").click().run()
-    assert "Draft plan" in page_text(at)
+    assert "Here's a draft media plan" in page_text(at)
     goal = at.radio(key="choice_goal_metric")
     goal.set_value(goal.options[1]).run()
-    assert "Draft plan" not in page_text(at)
+    assert "Here's a draft media plan" not in page_text(at)
 
 
 def test_debug_toggle_reveals_backend_details():
