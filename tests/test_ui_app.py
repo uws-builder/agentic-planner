@@ -269,3 +269,14 @@ def test_real_mode_renders_with_a_blank_option_and_unlocked_inputs():
     assert not at.exception, at.exception
     assert "(blank: type your own)" in at.selectbox(key="case_name").options
     assert not at.text_area(key="chat_text").disabled
+
+
+# ---- handoff to the buyer ----------------------------------------------------
+
+def test_plan_screen_offers_a_buyer_handoff():
+    at = to_plan(build(fresh()))
+    buttons = at.get("download_button")
+    assert len(buttons) == 1
+    proto = buttons[0].proto
+    assert proto.label == "Download buyer handoff (JSON)"
+    assert "plan_handoff.v0" in page_text(at)

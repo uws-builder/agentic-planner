@@ -16,6 +16,7 @@ from .env. Backend details are hidden unless "Show debug details" is on.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import time
@@ -30,6 +31,7 @@ from planner.commitments import active_in, timeframe_dates
 from planner.config import load_env
 from planner.context import build_context
 from planner.demo import DEMO_CASES, demo_response
+from planner.handoff import HandoffError, build_handoff
 from planner.model import AnthropicClient, ModelCallError, ScriptedClient
 from planner.names import norm_name
 from planner.plan import PlanError, build_dummy_plan, plan_table_markdown, summary_rows
@@ -368,16 +370,41 @@ def screen_thinking() -> None:
     st.rerun()
 
 
+def active_commitments(run: dict[str, Any], resolved) -> list:
+    """Commitments that overlap the plan's timeframe."""
+    start, end = timeframe_dates(resolved.values.get("timeframe"))
+    return active_in(run["bundle"].commitments or [], start, end)
+
+
 def constraints_for(run: dict[str, Any], resolved, overrides: set[str]) -> Constraints:
     """The rules the plan must follow: brand guidelines plus what the user said."""
     bundle = run["bundle"]
-    start, end = timeframe_dates(resolved.values.get("timeframe"))
     return compose_constraints(
         guidelines=bundle.guidelines,
         user_exclusions=resolved.values.get("restricted_publishers") or [],
         overrides=overrides,
-        commitments=active_in(bundle.commitments or [], start, end),
+        commitments=active_commitments(run, resolved),
     )
+
+
+def handoff_section(run: dict[str, Any], resolved, plan, constraints: Constraints) -> None:
+    """Offer the plan to the buyer agent as a plan_handoff.v0 file."""
+    st.markdown("**Hand off to the buyer**")
+    try:
+        handoff = build_handoff(plan, constraints, resolved.values, run["bundle"].advertiser,
+                                active_commitments(run, resolved))
+    except HandoffError as err:
+        st.info(str(err))
+        return
+    st.download_button(
+        "Download buyer handoff (JSON)",
+        data=json.dumps(handoff, indent=2),
+        file_name=f"{handoff['plan_id']}.json",
+        mime="application/json",
+        key="download_handoff",
+    )
+    st.caption("A plan_handoff.v0 file for agentic-buyer: "
+               "`python -m buyer run --plan <file> --real`.")
 
 
 def render_notice(notice) -> None:
@@ -502,6 +529,7 @@ def screen_plan(run: dict[str, Any]) -> None:
         )
         with st.expander("What the plan step received"):
             st.json(resolved.to_dict(), expanded=2)
+        handoff_section(run, resolved, plan, constraints)
 
     back_col, restart_col, _ = st.columns([1, 1, 2])
     back_col.button("← Back", key="back_to_verify", on_click=go, args=("verify",))

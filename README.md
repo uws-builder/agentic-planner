@@ -55,6 +55,9 @@ Rules from different sources combine by restriction, never by loosening:
 - Reconciliation, quote checking, and scoring against expected values.
 - Rule composition and a plan validator.
 - A dummy deterministic plan generator that honors the composed constraints.
+- Export to the buyer: the Plan screen's **Download buyer handoff (JSON)** button writes the
+  plan as `plan_handoff.v0` for [agentic-buyer](https://github.com/uws-builder/agentic-buyer). `planner/handoff.py` is
+  the only code that knows that format.
 - Commit safeguards (see below).
 
 ## What is not built yet
@@ -109,6 +112,7 @@ src/planner/
   commitments.py, guidelines.py, services.py
                           fake services with fault injection
   plan.py                 dummy plan generator
+  handoff.py              export a plan as plan_handoff.v0 for the buyer
   evals.py, cases.py      scoring and case loading
   ui/streamlit_app.py     the three screens
 cases/                    eval cases: inputs plus expected values
